@@ -1,0 +1,330 @@
+#!/usr/bin/python3
+import json
+import mimetypes
+import optparse
+import os
+import threading
+import time
+import flask
+import tempfile
+from urllib.parse import quote
+from flask import Flask, request, current_app, abort, Response, render_template_string
+
+STATUS_FIELDS = ['source', 'path', 'hashcode', 'filename',  'length', 'status', 'locked', 'current', 'chunks', 'update_at']
+
+
+class State(object):
+
+    def __init__(self, app):
+        self.config = app.config
+        self.locker = self.config['locker']
+
+    def tell_status(self, hashcode):
+        with self.locker:
+            config = self.config
+            shared_stat = config['shared_stat']
+            if hashcode in shared_stat:
+                return shared_stat[hashcode]
+            else:
+                return None
+
+    def lock_status(self, hashcode, sessionid):
+        with self.locker:
+            config = self.config
+            shared_stat = config['shared_stat']
+            if hashcode in shared_stat:
+                status = shared_stat[hashcode]
+                if status['status'] == 0:
+                    status = shared_stat[hashcode]
+                    status['status'] = 1
+                    status['chunks'] = []
+                    status['update_at'] = time.time()
+                status['locked'] = sessionid
+                return status
+            else:
+                return None
+
+    def init_status(self, hashcode):
+        with self.locker:
+            config = self.config
+            cache = config['cache']
+            shared_stat = config['shared_stat']
+            if hashcode not in shared_stat:
+                checked = False
+                target_state = dict()
+                target_dir = os.path.join(cache, hashcode)
+                target_state_file = os.path.join(target_dir, "state.json")
+                try:
+                    with open(target_state_file) as fp:
+                        target_state = json.load(fp)
+                        for chunk in target_state.get('chunks'):
+                            chunk_path = os.path.join(target_dir, chunk.get('name'))
+                            if os.path.exists(chunk_path) and os.path.getsize(chunk_path) == chunk.get('size'):
+                                continue
+                            else:
+                                break
+                        else:
+                            checked = True
+                except:
+                    pass
+                if not checked:
+                    if os.path.exists(target_state_file):
+                        os.remove(target_state_file)
+                    else:
+                        pass
+                    if not os.path.exists(target_dir):
+                        os.mkdir(target_dir)
+                    else:
+                        pass
+                    shared_stat[hashcode] = dict(
+                        path=None,
+                        hashcode=hashcode,
+                        filename=None,
+                        status=0,
+                        chunks=[],
+                        locked=None,
+                        source=None,
+                        length=None,
+                        current=0,
+                        update_at=time.time()
+                    )
+                else:
+                    completed = target_state['current'] == target_state['length']
+                    shared_stat[hashcode] = dict(
+                        path=target_state['path'],
+                        hashcode=hashcode,
+                        filename=target_state['filename'],
+                        status=2 if completed else 1,
+                        chunks=target_state['chunks'],
+                        locked=target_state['locked'],
+                        source=target_state['source'],
+                        length=target_state['length'],
+                        current=target_state['current'],
+                        update_at=target_state['update_at']
+                    )
+            else:
+                pass
+
+    def update_status(self, hashcode, path, pos, size, length, filename, source, chunk):
+        with self.locker:
+            config = self.config
+            cache = config['cache']
+            shared_stat = config['shared_stat']
+            if hashcode in shared_stat:
+                status = shared_stat[hashcode]
+                status['path'] = path
+                status['source'] = source
+                status['length'] = length
+                status['filename'] = filename
+                status['update_at'] = time.time()
+                chunk_name = "%s.bin" % pos
+                chunk_path = os.path.join(cache, hashcode, chunk_name)
+                state_file = os.path.join(cache, hashcode, "state.json")
+                with open(chunk_path, "wb") as fp:
+                    fp.write(chunk)
+                status['chunks'].append({
+                    'name': chunk_name,
+                    'size': size
+                })
+                status['current'] = status['current'] + size
+                total = sum(map(lambda x: x.get('size'), status['chunks']))
+                if total == length:
+                    status['status'] = 2
+                else:
+                    status['status'] = 1
+                with open(state_file, "w") as fp:
+                    json.dump(status, fp)
+                return status
+            else:
+                return None
+
+
+def handle_file(filename):
+    identity = request.args.get('id')
+    if identity and identity in current_app.config['clients']:
+        pos = request.args.get('pos')
+        path = request.args.get('path')
+        size = request.args.get('size')
+        source = request.args.get('source')
+        length = request.args.get('length')
+        hashcode = request.args.get('hashcode')
+        sessionid = request.args.get('sessionid')
+        state = State(current_app)
+        if hashcode and source:
+            if source == 'client':
+                if request.method == "HEAD":
+                    status = state.tell_status(hashcode)
+                    if not status:
+                        abort(404)
+                    elif status and status['status'] == 2:
+                        return "", 200
+                    elif status and status['status'] == 0:
+                        return "", 202
+                    elif status and status['status'] == 1:
+                        if status['locked'] == sessionid or time.time() - status['update_at'] > 30:
+                            # continue with progress, tell client the position
+                            resp = flask.Response()
+                            resp.status_code = 201
+                            resp.headers['POS'] = status['current']
+                            return resp
+                        else:
+                            abort(423)
+                    else:
+                        print(status)
+                else:
+                    status = state.lock_status(hashcode, sessionid)
+                    if status and status['status'] == 1 and status['locked'] == sessionid and path and size and filename and length:
+                        # allow upload
+                        pos = int(pos)
+                        size = int(size)
+                        length = int(length)
+                        status = state.update_status(hashcode, path, pos, size, length, filename, source, request.data)
+                        if status:
+                            resp = flask.Response()
+                            resp.status_code = 201
+                            resp.headers['POS'] = status['current']
+                            return resp
+                        else:
+                            abort(403)
+                    else:
+                        abort(401)
+
+            else:
+                if request.method == "HEAD":
+                    state.init_status(hashcode)
+                    return "", 200
+                else:
+                    status = state.tell_status(hashcode)
+                    while status['current'] <= 0:
+                        time.sleep(0.2)
+                        status = state.tell_status(hashcode)
+                    basedir = os.path.join(config['cache'], hashcode)
+
+                    def stream_yield():
+                        index = 0
+                        status = state.tell_status(hashcode)
+                        chunks = status['chunks'][:]
+                        while status['status'] != 2 or index <= len(chunks) - 1:
+                            if index <= len(chunks) - 1:
+                                chunk = chunks[index]
+                                with open(os.path.join(basedir, chunk.get('name')), "rb") as fd:
+                                    yield fd.read()
+                                index = index + 1
+                            status = state.tell_status(hashcode)
+                            chunks = status['chunks'][:]
+
+                    mime, _ = mimetypes.guess_type(status['filename'])
+                    resp = Response(stream_yield(), mimetype=mime)
+                    resp.headers.set('Content-Disposition', 'attachment; filename=%s' % quote(status['filename']))
+                    return resp
+        else:
+            abort(403)
+    else:
+        abort(404)
+
+
+def render_page():
+    content = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta charset="UTF-8">
+        <title>Transmart</title>
+    </head>
+    <body>
+    
+    </body>
+    <script>
+    document.onreadystatechange = function () {
+        if(document.readyState === "complete"){
+            let loc_uri = "http://{{ host }}/{{ fn }}?hashcode={{ hs }}&source=browser";
+            let srv_uri = "/transmart/{{ fn }}?id={{ id }}&hashcode={{ hs }}&source=browser";
+            let xhr = new XMLHttpRequest();
+            xhr.open("HEAD", loc_uri);
+            xhr.onreadystatechange = function(){
+                if(xhr.readyState === 4){
+                    if(xhr.status === 200){
+                        window.open(loc_uri, '_self');
+                    }else{
+                        let sxhr = new XMLHttpRequest();
+                        sxhr.open("HEAD", srv_uri);
+                        sxhr.onreadystatechange = function(){
+                            if(sxhr.readyState === 4 && sxhr.status === 200){
+                                window.open(srv_uri, '_self');
+                            }
+                        }
+                        sxhr.send();
+                    }                  
+                }
+            };
+            xhr.send();
+        }
+    }
+    </script>
+    </html>
+    """
+
+    return render_template_string(
+        content,
+        host=request.args.get('host'),
+        port=request.args.get('port'),
+        id=request.args.get('id'),
+        hs=request.args.get('hs'),
+        fn=request.args.get('fn')
+    )
+
+
+if __name__ == "__main__":
+    parser = optparse.OptionParser()
+    parser.add_option("-c", "--config", dest="config", default="/etc/transmart.json")
+    parser.add_option("-a", "--add-client", dest="new_client")
+    parser.add_option("-p", "--print-info", action="store_true", dest="print")
+    parser.add_option("-i", "--host", dest="host", default="0.0.0.0")
+    parser.add_option("-o", "--port", dest="port", type=int, default="6001")
+    parser.add_option("-d", "--cache-dir", dest="cache", default=os.path.join(tempfile.gettempdir(), "cache"))
+    options, args = parser.parse_args()
+    config = dict()
+    config_path = options.config
+    if os.path.exists(config_path):
+        with open(config_path) as fp:
+            config = json.load(fp)
+    else:
+        config = {
+            'cache': os.path.join(tempfile.gettempdir(), "cache"),
+            'clients': [],
+            'host': '0.0.0.0',
+            'port': 6001
+        }
+    if options.host:
+        config['host'] = options.host
+    if options.port:
+        config['port'] = options.port
+    if options.cache:
+        config['cache'] = options.cache
+    if not os.path.exists(options.cache):
+        os.mkdir(options.cache)
+
+    with open(config_path, "w") as fp:
+        json.dump(config, fp)
+
+    if options.new_client and options.new_client not in config['clients']:
+        config['clients'].append(options.new_client)
+        with open(config_path, "w") as fp:
+            json.dump(config, fp)
+
+    elif options.print:
+        print("Clients:")
+        for c in config['clients']:
+            print("\t" + c)
+        print("Proxy:\n\thttp://%s:%s/transmart/" % (config.get('host'), config.get('port')))
+        print("Cache:\n\t%s" % config.get('cache'))
+
+    else:
+        app = Flask(__name__)
+        app.config.update(config)
+        app.config['locker'] = threading.Lock()
+        app.config['shared_stat'] = dict()
+        app.add_url_rule('/transmart/<filename>', 'transmart', handle_file, methods=('HEAD', 'POST', 'GET',))
+        app.add_url_rule('/transmart/', 'index', render_page, methods=('GET',))
+        app.run(host=config.get('host'), port=config.get('port'), threaded=True)

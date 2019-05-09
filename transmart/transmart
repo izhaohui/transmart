@@ -1,0 +1,173 @@
+#!/usr/bin/python3
+import hashlib
+import json
+import logging
+import optparse
+import os
+import socket
+import threading
+import time
+import qrcode
+import random
+import requests
+from urllib.parse import quote
+from flask import Flask, request, send_file, Response, make_response, abort
+
+
+def generate_id():
+    str_id = ""
+    while len(str_id) < 16:
+        code = random.randint(97, 122)
+        str_id += chr(code)
+    return str_id
+
+
+def get_host_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(('1.1.1.1', 80))
+        ip = s.getsockname()[0]
+    finally:
+        s.close()
+    return ip
+
+
+def proxy_file(path, hashcode, filename, sessionid, config):
+    if config.get('proxy'):
+        response = None
+        response_code = 400
+        starts = time.time()
+        identity = config.get('identity')
+        uri = config.get('proxy') + quote(filename)
+        while time.time() - starts < 5 * 60 and response_code not in (201, 202,):
+            response = requests.head(uri, params={
+                'path': path,
+                'id': identity,
+                'source': 'client',
+                'hashcode': hashcode,
+                'filename': filename,
+                'sessionid': sessionid
+            })
+            response_code = response.status_code
+            time.sleep(0.5)
+
+        if response_code in (201, 202,):
+            # break upload
+            pos = int(response.headers.get('POS', '0'))
+            block_size = config.get('block')
+            file_length = os.path.getsize(path)
+            with open(path, "rb") as fp:
+                fp.seek(pos)
+                act_size = 0
+                status_code = 201
+                while status_code == 201:
+                    data = fp.read(block_size)
+                    if data:
+                        act_size = len(data)
+                        update_response = requests.post(uri, params={
+                            'pos': pos,
+                            'path': path,
+                            'id': identity,
+                            'size': act_size,
+                            'source': 'client',
+                            'length': file_length,
+                            'hashcode': hashcode,
+                            'sessionid': sessionid
+                        }, data=data)
+                        pos += act_size
+                        status_code = update_response.status_code
+
+                    time.sleep(0.001)
+        else:
+            pass
+    else:
+        pass
+
+
+def main(path, config):
+    if os.path.exists(path):
+        identity = config['identity']
+        sessionid = random.randint(10000000, 99999999)
+        buffer = (path + config['identity']).encode('utf-8')
+        hashcode = hashlib.md5(buffer).hexdigest()
+        filename, fullpath = os.path.basename(path), os.path.join(os.getcwd(), path)
+        config[hashcode] = fullpath
+        app = Flask(__name__)
+
+        def serve_file(file_name):
+            code = request.args.get('hashcode')
+            if code and config[code]:
+                path = config[code]
+                if request.method == "GET":
+                    response = make_response(send_file(path))
+                    response.headers['Access-Control-Allow-Origin'] = "*"
+                    return response
+                else:
+                    resp = Response()
+                    resp.headers['Access-Control-Allow-Origin'] = "*"
+                    resp.status_code = 200
+                    return resp
+            else:
+                abort(404)
+
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=5,
+            border=2
+        )
+        ip = get_host_ip()
+        port = random.randint(5000, 60000)
+        server_base = config.get('proxy')
+        tmp_uri = server_base + '?host=%s:%s&id=%s&hs=%s&fn=%s' % (ip, port, identity, hashcode, quote(filename))
+        print(tmp_uri + "\n\n")
+        qr.add_data(tmp_uri)
+        qr.print_tty()
+
+        os.environ['WERKZEUG_RUN_MAIN'] = 'true'
+
+        uploader = threading.Thread(target=proxy_file, args=(fullpath, hashcode, filename, sessionid, config), daemon=True)
+        uploader.start()
+        app.add_url_rule('/<file_name>', 'serve', serve_file, methods=("HEAD", "GET"))
+        log = logging.getLogger('werkzeug')
+        log.setLevel(logging.ERROR)
+        app.run(host=ip, port=port)
+    else:
+        pass
+
+
+if __name__ == "__main__":
+    config = dict()
+    parser = optparse.OptionParser()
+    parser.add_option("-p", "--proxy", dest="proxy")
+    parser.add_option("-b", "--block", dest="block_size", default=512)
+    parser.add_option("-i", "--info", dest="info", action="store_true")
+    temp_id = generate_id()
+    options, args = parser.parse_args()
+    config_path = os.path.expanduser("~/.transmart.conf")
+    if os.path.exists(config_path):
+        with open(config_path) as fp:
+            config = json.load(fp)
+    config = {
+        'identity': config.get('identity') if config.get('identity') else temp_id,
+        'block': int(options.block_size) * 1024 if options.block_size else 64 * 1024,
+        'proxy': options.proxy if options.proxy else config.get('proxy', '')
+    }
+    with open(config_path, "w") as fp:
+        json.dump(config, fp)
+    if options.info:
+        print("Transmart\n")
+        print("proxy uri is '%s'" % config.get('proxy'))
+        print('proxy block size is %sBytes' % config.get('block'))
+        print('proxy identity is %s' % config.get('identity'))
+    else:
+        if args and config['proxy']:
+            main(args[0], config)
+        else:
+            if args:
+                print("set proxy url first~")
+            else:
+                print("special file please~")
+
+
+

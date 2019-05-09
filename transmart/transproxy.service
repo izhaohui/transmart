@@ -1,0 +1,11 @@
+[Unit]
+Description=File Transfer Proxy
+After=network.target
+
+[Service]
+Type=simple
+Environment="WERKZEUG_RUN_MAIN=true"
+ExecStart=/usr/local/bin/transproxy
+
+[Install]
+WantedBy=multi-user.target
