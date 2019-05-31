@@ -8,7 +8,7 @@ shutil.copy("transmart/transproxy.service", "/etc/systemd/system/")
 
 setuptools.setup(
     name='transmart',
-    version='0.1',
+    version='0.2',
     author='zhaohui',
     author_email='zhaohui-sol@gfoxmail.com',
     description='Transfer file over LAN or Internet via terminal',

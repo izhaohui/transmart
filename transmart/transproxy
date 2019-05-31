@@ -230,28 +230,57 @@ def render_page():
     <head>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta charset="UTF-8">
-        <title>Transmart</title>
+        <title></title>
+        <style></style>
     </head>
     <body>
-    
+    <div>
+        <h2 id='message'>Please Wait...</h2>
+    </div>
     </body>
     <script>
+    let pg = 0;
+    let interid = null;
+    let filename = decodeURI("{{ fn }}");
+    let elem = document.querySelector("#message");
+    let complete = function(){
+        if(interid != null){
+            clearInterval(interid);
+            interid = null;
+            elem.innerText = 'Downloading...';
+        };
+    };
+    let fail = function(){
+        if(interid != null){
+            clearInterval(interid);
+            interid = null;
+            elem.innerText = 'Failed...';
+        };
+    };
     document.onreadystatechange = function () {
         if(document.readyState === "complete"){
             let loc_uri = "http://{{ host }}/{{ fn }}?hashcode={{ hs }}&source=browser";
             let srv_uri = "/transmart/{{ fn }}?id={{ id }}&hashcode={{ hs }}&source=browser";
             let xhr = new XMLHttpRequest();
+            xhr.timeout = 500;
             xhr.open("HEAD", loc_uri);
             xhr.onreadystatechange = function(){
                 if(xhr.readyState === 4){
                     if(xhr.status === 200){
+                        complete();
                         window.open(loc_uri, '_self');
                     }else{
                         let sxhr = new XMLHttpRequest();
+                        sxhr.timeout = 500;
                         sxhr.open("HEAD", srv_uri);
                         sxhr.onreadystatechange = function(){
-                            if(sxhr.readyState === 4 && sxhr.status === 200){
-                                window.open(srv_uri, '_self');
+                            if(sxhr.readyState === 4){
+                                if(sxhr.status === 200){
+                                    complete();
+                                    window.open(srv_uri, '_self');
+                                }else{
+                                    fail();
+                                }                                
                             }
                         }
                         sxhr.send();
@@ -259,6 +288,16 @@ def render_page():
                 }
             };
             xhr.send();
+            document.title = filename;
+            interid = setInterval(function(){
+                let base = 'Please Wait';
+                for(let i = 0;i<pg;i++){
+                    base += '.';
+                }
+                elem.innerText = base;
+                pg = pg < 5? pg + 1: 0;
+            }, 100);
+            
         }
     }
     </script>
