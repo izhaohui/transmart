@@ -5,7 +5,6 @@ import logging
 import optparse
 import os
 import socket
-import sys
 import threading
 import time
 import qrcode
@@ -54,6 +53,7 @@ def proxy_file(path, hashcode, filename, sessionid, config):
                 time.sleep(0.5)
             except requests.exceptions.RequestException as ex:
                 print("Access proxy server error, try again now.")
+                time.sleep(2)
 
         if response_code in (201, 202,):
             # break upload
@@ -83,6 +83,7 @@ def proxy_file(path, hashcode, filename, sessionid, config):
                             status_code = update_response.status_code
                         except requests.exceptions.RequestException as ex:
                             print("Push file to proxy server error, try again now.")
+                            time.sleep(2)
 
                     time.sleep(0.001)
         else:
