@@ -17,5 +17,5 @@ setuptools.setup(
     url='https://github.com/izhaohui/transmart',
     packages=['transmart'],
     scripts=['transmart/transmart', 'transmart/transproxy'],
-    install_requires=['qrcode==6.1', 'Flask==1.0.2', 'requests==2.21.0']
+    install_requires=['qrcode==6.1', 'Flask==2.3.2', 'requests==2.21.0']
 )
